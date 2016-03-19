@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="ISO-8859-15"?>
+
+<launch>
+    <remap from="cam1_feed" to="/bumblebee/left/image_rect"/>
+    <remap from="cam2_feed" to="/xtion/rgb/image_rect_mono"/>
+
+    <!-- CAMERA PARAMETERS: -->
+    <group ns="cam1"> <!-- BUMBLEBEE -->
+        <rosparam param="K">[
+            [811.857711829874, 0.0, 515.7504920959473],
+            [0.0, 811.857711829874, 403.7249565124512],
+            [0.0, 1.0, 0.0]
+            ]
+        </rosparam>
+        <rosparam param="D">[[0.0], [0.0], [0.0], [0.0], [0.0]]</rosparam>
+        <param name="do_undistort" value="False"/>
+        <param name="do_img_flip" value="False"/>
+        <param name="img_flip_type" value="-1"/> <!-- arg for cv2.flip -->
+    </group> 
+
+    <group ns="cam2"> <!-- XTION -->
+        <rosparam param="K">[
+            [ 552.24642152, 0.0, 325.71609566],
+            [0.0, 549.55314454, 236.11290228],
+            [0.0, 0.0, 1.0]
+            ]
+        </rosparam>
+        <rosparam param="D">[
+            [0.01178956], [-0.01958604], [-0.00250728], [-0.0011414],  [0.00411025]
+            ]
+        </rosparam>
+        <param name="do_undistort" value="False"/>
+        <param name="do_img_flip" value="False"/>
+        <param name="img_flip_type" value="-1"/> <!-- arg for cv2.flip -->
+    </group>
+
+    <node pkg="async_stereo_calibration" type="calibrator.py" name="stereo_calibrator" output="screen">
+        <param name ="board_rows" value="8"/>
+        <param name ="board_cols" value="10"/>
+        <param name ="board_size" value=".02"/>
+
+        <param name ="load_calib_data" value="False"/>
+        <param name ="save_calib_data" value="True"/>
+    </node>
+    <node pkg="async_stereo_calibration" type="imshower.py" name="image_shower" output="screen" respawn="true"/>
+    <node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/>
+</launch>
+
+
