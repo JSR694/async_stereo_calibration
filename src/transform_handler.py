@@ -8,8 +8,9 @@
 
 import roslib
 import rospy
+import genpy
 import tf
-from baxter_stereo_calibration.srv import SetStereoTF
+from async_stereo_calibration.srv import SetStereoTF
 
 class StereoTFPublisher(object):
     def __init__(self, cam1_frame_name, cam2_frame_name):
@@ -28,13 +29,16 @@ class StereoTFPublisher(object):
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
             if self.tf_R is not None and self.tf_T is not None :
-                br.sendTransform(self.tf_T, self.tf_R, rospy.Time.now(),
+                self.br.sendTransform(self.tf_T, self.tf_R, rospy.Time.now(),
                         self.cam1_frame, self.cam2_frame)
             rate.sleep()
 
     def update_tf(self, req): 
-        self.tf_T = req.tf.position
-        self.tf_R = req.tf.orientation
+        # Must convert from msgs to tuples:
+        self.tf_T = (req.tf.position.x, req.tf.position.y, req.tf.position.z)
+        q = req.tf.orientation
+        self.tf_R = (q.x, q.y, q.z, q.w)
+        print "Transform handler received new tf.  Publishing..."
 
 if __name__ == "__main__":
     rospy.init_node("stereo_tf_publisher")

@@ -39,11 +39,12 @@
         <param name ="board_cols" value="10"/>
         <param name ="board_size" value=".02"/>
 
-        <param name ="load_calib_data" value="False"/>
+        <param name ="load_calib_data" value="True"/>
         <param name ="save_calib_data" value="True"/>
+        <param name ="load_data_dir" value="/tmp/"/>
+        <param name ="save_data_dir" value="/tmp/"/>
     </node>
-    <node pkg="async_stereo_calibration" type="imshower.py" name="image_shower" output="screen" respawn="true"/>
-    <node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/>
+    <!--node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/-->
 </launch>
 
 

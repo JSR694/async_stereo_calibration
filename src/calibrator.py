@@ -21,10 +21,11 @@ import sys
 import rospy
 import genpy
 import tf
-from baxter_stereo_calibration.srv import *
+from datetime import datetime # for file timestamp
+from async_stereo_calibration.srv import *
 from std_msgs.msg import Int32
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Point, Quaternion
 from cv_bridge import CvBridge, CvBridgeError
 from distutils.version import LooseVersion
 
@@ -34,14 +35,17 @@ def pdist(p1, p2):
     """
     return np.linalg.norm((p1[0]-p2[0],p1[1]-p2[1]))
 
-class BaxterStereoCalibrator(object):
+class AsyncStereoCalibrator(object):
     def __init__(self, cam1_topic_name, cam2_topic_name, 
             cam1_K, cam1_D, cam2_K, cam2_D, 
             cam1_do_undistort = False, cam2_do_undistort = False,
             board_dim = (8,10), board_size = .02,
-            load_calib_data = False, save_calib_data = True):
+            load_calib_data = False, save_calib_data = True,
+            load_data_dir = "/tmp/", save_data_dir = "/tmp/"):
         self.load_calib_data = load_calib_data
         self.save_calib_data = save_calib_data
+        self.load_data_dir = load_data_dir
+        self.save_data_dir = save_data_dir
         self.cam1_K = cam1_K
         self.cam1_D = cam1_D
         self.cam2_K = cam2_K
@@ -104,7 +108,7 @@ class BaxterStereoCalibrator(object):
 
         # Calibrate using recorded point correspondencies, or capture new ones:
         if self.load_calib_data:
-            self.cal_fromcorners(load_data = True)
+            self.cal_fromcorners()
         else:
             # Init node pubs and subs for checkerboard detection: 
             self.bridge = CvBridge()
@@ -124,26 +128,9 @@ class BaxterStereoCalibrator(object):
                     queue_size = 3)
             self.cam2_pub = rospy.Publisher(self.cam2_pub_topic,Image,
                     queue_size = 3)
-            # Listens for user keypresses:
-            # TODO should this be a constructor param?
-            self.keypress_sub = rospy.Subscriber('img_keypress', Int32,
-                    self.handle_keypress, queue_size = 5)
             
             #Try to initiate calibration using correspondencies.
-            rospy.on_shutdown(self.do_cal_fromcorners)
-
-    def do_cal_fromcorners(self):
-        print "SAVE?\t", self.save_calib_data
-        #Try to initiate calibration using correspondencies.
-        self.cal_fromcorners(save_data = self.save_calib_data, 
-                load_data = False)
-
-    def handle_keypress(self, msg):
-        keycode = msg.data
-        if keycode == 1048689:
-            #Try to initiate calibration using correspondencies.
-            self.cal_fromcorners(save_data = self.save_calib_data, 
-                    load_data = False)
+            rospy.on_shutdown(self.cal_fromcorners)
 
     def reset_correspondence_search(self):
         print "TOTAL CORRESPONDENCES FOUND:\t", str(len(self.stereo_correspondences))
@@ -247,20 +234,6 @@ class BaxterStereoCalibrator(object):
                     (self.n_board_rows, self.n_board_cols), 
                     downsampled_corners, True)
             self.need_follower_calib_frame = True
-        '''
-        dt = img_msg.header.stamp-self.init_time
-        dt = dt.to_sec()
-        cv2.putText(cv_image, str(dt), 
-                (0,cv_image.shape[0]), 
-                cv2.FONT_HERSHEY_SIMPLEX, 3, (255,255,255), 10)
-        cv2.putText(cv_image, str(dt), 
-                (0,cv_image.shape[0]),
-                cv2.FONT_HERSHEY_SIMPLEX, 3, (255,0,0), 3)
-        win_name = self.win2_name if cam==2 else self.win1_name
-        cv2.imshow(win_name,scrib)
-            #Try to initiate calibration using correspondencies.
-            self.cal_fromcorners()
-        '''
         # Convert cv img to img msg and publish:
         if cam == 1:
             self.cam1_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, '8UC1'))
@@ -421,50 +394,20 @@ class BaxterStereoCalibrator(object):
                                           ( cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1 ))
 
         return (ok, corners)
-
-    def cal_fromcorners(self, save_data = True, load_data = False): 
+    
+    # RUN STEREO CALIBRATION
+    def cal_fromcorners(self): 
         #                                , do_mono_calib = False):
         #if do_mono_calib:
         #    print
         #     TODO Perform monocular calibrations
         #    self.l.cal_fromcorners(cam1_corners)
         #    self.r.cal_fromcorners(cam2_corners)
-        cam1_ipts, cam2_ipts, b = None, None, None
-
-        if load_data:
-            #TODO Loading and save dirs set via ros param.
-            print "LOADING DATA"
-            cam1_ipts = np.load("/tmp/cam1_points.npy")
-            cam2_ipts = np.load("/tmp/cam2_points.npy")
-            b = np.load("/tmp/board_points.npy")
-            print "LOADED"
-            #TODO print some data abt loaded stuff
-        else:
-            # each elem in stereo_corr.s: (cam1_frame, cam2_frame)
-            # each cam#_frame: (img, corners, timestamp)
-            cam1_ipts = np.array([ cam1[1] for cam1, cam2 in self.stereo_correspondences])
-            cam2_ipts = np.array([ cam2[1] for cam1, cam2 in self.stereo_correspondences])
-            try:
-                xtion_y = self.stereo_correspondences[0][1][0].shape[0]
-                xtion_x = self.stereo_correspondences[0][1][0].shape[1]
-                for corners in cam2_ipts:
-                    for i in range(corners.shape[0]):
-                        corners[i,0,1] = xtion_y - corners[i,0,1]
-                        corners[i,0,0] = xtion_x - corners[i,0,0]
-            except IndexError:
-                n = str(len(self.stereo_correspondences))
-                print "NOT ENOUGH CORRESPONDENCES FOUND: %s" % n
-                return
-
-            #cv2.stereoCalib requires each image pair have its own set of board points...
-            b = np.array([self.CHESSBOARD[0] for i in range(len(self.stereo_correspondences))])
-            
-            # Only save data if it wasn't loaded in the first place:
-            if save_data:
-                print "SAVING CAM1,2 POINTS AND BOARD POINTS TO /tmp/"
-                numpy.save("/tmp/board_points",b)
-                numpy.save("/tmp/cam1_points",cam1_ipts)
-                numpy.save("/tmp/cam2_points",cam2_ipts)
+        cam1_ipts, cam2_ipts, b = self.get_calib_data()
+        print "Calibration data info:"
+        print "  CAM1 data array shape:\t %s" % str(cam1_ipts.shape)
+        print "  CAM2 data array shape:\t %s" % str(cam2_ipts.shape)
+        print "  BOARD data array shape:\t %s" % str(b.shape)
 
         flags = cv2.CALIB_FIX_INTRINSIC
 
@@ -491,21 +434,83 @@ class BaxterStereoCalibrator(object):
                                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1, 1e-5),
                                flags = flags)
         print "RESULTS (R, T):"
-        print self.R, self.T
+        print self.R, "\n", self.T
         homog = np.hstack((self.R, np.array([[0],[0],[0]])))
         homog = np.vstack((homog, np.array([0,0,0,1])))
-        print "generating quaternion from:"
-        print homog
-        print
-        print "AS A QUATERNION:"
-        quat = tf.transformations.quaternion_from_matrix(homog)
-        print quat
+        print "R AS A QUATERNION:"
+        q = tf.transformations.quaternion_from_matrix(homog)
+        print q
+        # NOTE quat_from_mat() doesn't return a quaternion object!
+        #   But the Pose msg requires one!  
+        #   Fun times if ya like debugging cryptic errors!
+        q_msg = Quaternion(q[0], q[1], q[2], q[3])
+        t_msg = Point(self.T[0], self.T[1], self.T[2])
 
         # Send the calculated tf to the tf handler node:
-        self.publish_stereo_tf(Pose(self.T, quat))
+        posemsg = Pose(t_msg, q_msg)
+        try:
+            self.publish_stereo_tf(posemsg)
+        except rospy.service.ServiceException:
+            print "Service request was successful!"
+        print "Shutting down calibrator node %s" % rospy.get_name()
+        sys.exit([0])
+
         #TODO need this?
         #self.set_alpha(0.0)
 
+    # Load calib data from file or prepare it from newly captured frames.
+    #   Return cam1_points, cam2_points, board_points
+    def get_calib_data(self):
+        cam1_ipts, cam2_ipts, b = None, None, None
+        
+        if self.load_calib_data: ### Load data from save_data_dir:
+            try:
+                print "Attempting to load data from %s" % self.load_data_dir
+                print "  Looking for %s" % self.load_data_dir + "board_pts.npy"
+                b = np.load(self.load_data_dir + "board_pts.npy")
+                print "  Looking for %s" % self.load_data_dir + "cam1_pts.npy"
+                cam1_ipts = np.load(self.load_data_dir + "cam1_pts.npy")
+                print "  Looking for %s" % self.load_data_dir + "cam2_pts.npy"
+                cam2_ipts = np.load(self.load_data_dir + "cam2_pts.npy")
+                print "Loading successful!"
+            except IOError:
+                print "FAILED TO FIND SAVED DATA!"
+                sys.exit(["Exited on load failure."])
+        else: ### Create calib point arrays from captured correspondencies:
+            # each elem in stereo_corr.s: (cam1_frame, cam2_frame)
+            # each cam#_frame: (img, corners, timestamp)
+            cam1_ipts = np.array([ cam1[1] for cam1, cam2 in self.stereo_correspondences])
+            cam2_ipts = np.array([ cam2[1] for cam1, cam2 in self.stereo_correspondences])
+            try:
+                xtion_y = self.stereo_correspondences[0][1][0].shape[0]
+                xtion_x = self.stereo_correspondences[0][1][0].shape[1]
+                for corners in cam2_ipts:
+                    for i in range(corners.shape[0]):
+                        corners[i,0,1] = xtion_y - corners[i,0,1]
+                        corners[i,0,0] = xtion_x - corners[i,0,0]
+            except IndexError:
+                n = str(len(self.stereo_correspondences))
+                print "NOT ENOUGH CORRESPONDENCES FOUND: %s" % n
+                return
+
+            #cv2.stereoCalib requires each image pair have its own set of board points...
+            b = np.array([self.CHESSBOARD[0] for i in range(len(self.stereo_correspondences))])
+
+            ### Save new data, if specified:
+            if self.save_calib_data:
+                tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
+                board_file = self.save_data_dir + "board_pts_" + tstamp
+                cam1_file = self.save_data_dir + "cam1_pts_" + tstamp
+                cam2_file = self.save_data_dir + "cam2_pts_" + tstamp
+                print "SAVING CAM1,2 POINTS AND BOARD POINTS:"
+                numpy.save(board_file,b)
+                print "\tBOARD PTS: %s" % board_file
+                numpy.save(cam1_file,cam1_ipts)
+                print "\tCAM1 PTS: %s" % cam1_file
+                numpy.save(cam2_file,cam2_ipts)
+                print "\tCAM2 PTS: %s" % cam2_file
+
+        return cam1_ipts, cam2_ipts, b
 
     def mk_object_points(self, use_board_size = False):
         opts = []
@@ -537,12 +542,16 @@ def start_calibrator():
     board_size = rospy.get_param('~board_size')
     load_calib_data = rospy.get_param('~load_calib_data')
     save_calib_data = rospy.get_param('~save_calib_data')
+    load_data_dir = rospy.get_param('~load_data_dir')
+    save_data_dir = rospy.get_param('~save_data_dir')
 
-    calibrator = BaxterStereoCalibrator("cam1_feed","cam2_feed", 
+    calibrator = AsyncStereoCalibrator("cam1_feed","cam2_feed", 
             cam1['K'], cam1['D'],cam2['K'], cam2['D'],
             board_dim = (board_rows, board_cols), board_size = board_size,
             load_calib_data = load_calib_data,
-            save_calib_data = save_calib_data)
+            save_calib_data = save_calib_data,
+            load_data_dir = load_data_dir,
+            save_data_dir = save_data_dir)
     rospy.spin()
 
 if __name__ == "__main__":
@@ -567,6 +576,6 @@ if __name__ == "__main__":
             [0.0, 1.0, 0.0]])
     bumblebee_D = np.zeros((5,1), np.float64)
 
-    calibrator = BaxterStereoCalibrator("/bumblebee/left/image_rect","/xtion/rgb/image_rect_mono", bumblebee_K, bumblebee_D,xtion_K, xtion_D, load_calib_data = False)
+    calibrator = AsyncStereoCalibrator("/bumblebee/left/image_rect","/xtion/rgb/image_rect_mono", bumblebee_K, bumblebee_D,xtion_K, xtion_D, load_calib_data = False)
     rospy.spin()
     '''
