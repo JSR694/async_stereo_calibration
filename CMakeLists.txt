@@ -105,7 +105,7 @@ generate_messages(
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-  INCLUDE_DIRS include
+    #INCLUDE_DIRS include
   LIBRARIES async_stereo_calibration
    CATKIN_DEPENDS apriltags_ros cv_bridge rospy rviz sensor_msgs std_msgs tf message_runtime
   DEPENDS system_lib

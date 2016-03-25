@@ -9,6 +9,7 @@
 #
 ################################################################################
 
+import numpy as np
 import roslib
 import rospy
 import genpy
@@ -42,8 +43,11 @@ class StereoTFPublisher(object):
         self.tf_T = (req.tf.position.x, req.tf.position.y, req.tf.position.z)
         q = req.tf.orientation
         self.tf_R = (q.x, q.y, q.z, q.w)
+        mate = tf.transformations.quaternion_matrix(self.tf_R)
+        self.tf_T = -np.dot(mate.T[0:3,0:3], self.tf_T)
+        self.tf_R = tf.transformations.quaternion_from_matrix(mate.T)
         print "Transform handler received new tf.  Publishing..."
 
 if __name__ == "__main__":
     rospy.init_node("stereo_tf_publisher")
-    pubby = StereoTFPublisher("bumblebee", "xtion")
+    pubby = StereoTFPublisher("xtion_link","bumblebee")

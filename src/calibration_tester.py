@@ -9,7 +9,7 @@
 ################################################################################
 
 from geometry_msgs.msg import Quaternion, Point, Pose, PoseStamped, PoseArray
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Header
 import numpy as np
 import roslib
 import rospy
@@ -91,7 +91,7 @@ class StereoCalibTester(object):
         if looking == 0:
             return 
         print "Found cam1 --> cam2 TF! Starting error metric publishing:"
-        self.cam1_to_cam2 = self.listener.lookupTransform('bumblebee','xtion', rospy.Time(0))
+        self.cam1_to_cam2 = self.listener.lookupTransform('stereo_camera','xtion_rgb_optical_frame', rospy.Time(0))
 
         # Subscribers for Apriltag detection poses:
         self.cam1_tag_pose_sub = rospy.Subscriber(self.cam1_tag_topic_name,
@@ -114,8 +114,8 @@ class StereoCalibTester(object):
                     self.cam2_tag_pose is not None and
                     self.tag_reprojected is not None):
                 print "Calculating error metric!"
-                rot_error_msg = (self.get_orientation_error())
-                trans_error_msg = Float32(self.get_orientation_error())
+                rot_error_msg = Float32(self.get_orientation_error())
+                trans_error_msg = Float32(self.get_position_error())
                 self.rot_error_pub.publish(rot_error_msg)
                 self.trans_error_pub.publish(trans_error_msg)
             else:
@@ -134,16 +134,10 @@ class StereoCalibTester(object):
         print "GOT TAG IN CAM1!"
         if len(msg.poses) > 0:
             self.cam1_tag_pose = msg.poses[0]
+            stamped = PoseStamped(Header(0,rospy.Time.now(),'xtion_rgb_optical_frame'), self.cam1_tag_pose)
             ### Recalculate tag_projected:
             # Transform position and orientation:
-            c1_to_c2_t, c1_to_c2_r = self.cam1_to_cam2
-            q = tf.transformations.quaternion_multiply(
-                    c1_to_c2_r,
-                    self.quat_msg_to_tuple(self.cam1_tag_pose.orientation))
-            t = Point(c1_to_c2_t[0] + self.cam1_tag_pose.position.x,
-                    c1_to_c2_t[1] + self.cam1_tag_pose.position.y,
-                    c1_to_c2_t[2] + self.cam1_tag_pose.position.z)
-            self.tag_reprojected = Pose(t, Quaternion(q[0],q[1],q[2],q[3]))
+            self.tag_reprojected = self.listener.transformPose("stereo_camera",stamped).pose
 
     def handle_cam2_tag_pose(self, msg):
         print "GOT TAG IN CAM2!"
@@ -166,13 +160,13 @@ class StereoCalibTester(object):
 
     # Returns euclidean distance between two poses:
     def get_position_error(self):
-        t1, t2 = self.cam2_tag_pose.Position, self.tag_reprojected.Position
-        return np.linalg.norm(np.array([t1.x-t2.x,t1.y-t2.y,t1.x-t1.z]))
+        t1, t2 = self.cam2_tag_pose.position, self.tag_reprojected.position
+        return np.linalg.norm(np.array([t1.x, t1.y, t1.z])-np.array([t2.x, t2.y, t2.z]))
 
 def start_calib_tester():
     # TODO load params and init calib tester object.
-    cam1_frame_name = "bumblebee"
-    cam2_frame_name = "xtion"
+    cam1_frame_name = "stereo_camera"
+    cam2_frame_name = "xtion_rgb_optical_frame"
     cam1_topic_name = "/cam1/tag_detections_pose"
     cam2_topic_name = "/cam2/tag_detections_pose"
     StereoCalibTester(cam1_frame_name, cam2_frame_name,

@@ -41,10 +41,10 @@
 
         <param name ="load_calib_data" value="True"/>
         <param name ="save_calib_data" value="False"/>
-        <param name ="load_data_dir" value="/home/jack/stereo_correspondencies_67/"/>
+        <param name ="load_data_dir" value="/home/baxter/Desktop/stereo_correspondencies_67/"/>
         <param name ="save_data_dir" value="/tmp/"/>
     </node>
-    <!--node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/-->
+    <node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/>
 </launch>
 
 
