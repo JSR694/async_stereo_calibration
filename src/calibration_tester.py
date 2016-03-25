@@ -9,7 +9,7 @@
 ################################################################################
 
 from geometry_msgs.msg import Quaternion, Point, Pose, PoseStamped, PoseArray
-from std_msgs.msg import Int32
+from std_msgs.msg import Float32
 import numpy as np
 import roslib
 import rospy
@@ -77,8 +77,19 @@ class StereoCalibTester(object):
         # Activate once the cam1 --> cam2 tf has been published.
         print "Waiting for tf between frames: " + self.cam1_frame, self.cam2_frame
         # TODO better way to make the timeout infinite?
-        #self.listener.waitForTransform(self.cam1_frame,self.cam2_frame,
-                #rospy.Time.now(), rospy.Duration(9*10^10))
+
+        # For some reason need to look for the tf a few times:
+        looking = 10
+        while looking > 0:
+            try:
+                self.listener.waitForTransform(self.cam1_frame,self.cam2_frame,
+                        rospy.Time.now(), rospy.Duration(1))
+                looking = -1
+            except:
+                looking -=1
+                print "TF wait timed out. trying again %s" % str(looking)
+        if looking == 0:
+            return 
         print "Found cam1 --> cam2 TF! Starting error metric publishing:"
         self.cam1_to_cam2 = self.listener.lookupTransform('bumblebee','xtion', rospy.Time(0))
 
@@ -87,9 +98,9 @@ class StereoCalibTester(object):
                 PoseArray, self.handle_cam1_tag_pose, queue_size=3)
         self.cam2_tag_pose_sub = rospy.Subscriber(self.cam2_tag_topic_name,
                 PoseArray, self.handle_cam2_tag_pose, queue_size=3)
-        self.trans_error_pub = rospy.Publisher(self.trans_error_topic, Int32,
+        self.trans_error_pub = rospy.Publisher(self.trans_error_topic, Float32,
                 queue_size = 10)
-        self.rot_error_pub = rospy.Publisher(self.rot_error_topic, Int32,
+        self.rot_error_pub = rospy.Publisher(self.rot_error_topic, Float32,
                 queue_size = 10)
 
         self.main_loop()
@@ -103,8 +114,8 @@ class StereoCalibTester(object):
                     self.cam2_tag_pose is not None and
                     self.tag_reprojected is not None):
                 print "Calculating error metric!"
-                rot_error_msg = Int32(self.get_orientation_error())
-                trans_error_msg = Int32(self.get_orientation_error())
+                rot_error_msg = (self.get_orientation_error())
+                trans_error_msg = Float32(self.get_orientation_error())
                 self.rot_error_pub.publish(rot_error_msg)
                 self.trans_error_pub.publish(trans_error_msg)
             else:
@@ -125,13 +136,14 @@ class StereoCalibTester(object):
             self.cam1_tag_pose = msg.poses[0]
             ### Recalculate tag_projected:
             # Transform position and orientation:
+            c1_to_c2_t, c1_to_c2_r = self.cam1_to_cam2
             q = tf.transformations.quaternion_multiply(
-                    self.quat_msg_to_tuple(self.cam1_to_cam2.orientation),
+                    c1_to_c2_r,
                     self.quat_msg_to_tuple(self.cam1_tag_pose.orientation))
-            t = Point(self.cam1_to_cam2.position.x + self.cam1_tag_pose.position.x,
-                    self.cam1_to_cam2.position.y + self.cam1_tag_pose.position.y,
-                    self.cam1_to_cam2.position.z + self.cam1_tag_pose.position.z)
-            self.tag_reprojected = Pose(t, Quaterion(q[0],q[1],q[2],q[3]))
+            t = Point(c1_to_c2_t[0] + self.cam1_tag_pose.position.x,
+                    c1_to_c2_t[1] + self.cam1_tag_pose.position.y,
+                    c1_to_c2_t[2] + self.cam1_tag_pose.position.z)
+            self.tag_reprojected = Pose(t, Quaternion(q[0],q[1],q[2],q[3]))
 
     def handle_cam2_tag_pose(self, msg):
         print "GOT TAG IN CAM2!"
@@ -142,11 +154,11 @@ class StereoCalibTester(object):
     #   and pose of the same tag when seen by cam2 and transformed into 
     #   cam1's frame.
     def get_orientation_error(self, metric = 'AXIS_ANGLE'):
-        if method == 'AXIS_ANGLE':
+        if metric == 'AXIS_ANGLE':
             # Convert to axis-angle and compute 2-norm:
             x1,y1,z1,s1 = axis_angle_from_quat(self.cam2_tag_pose.orientation)
             x2,y2,z2,s2 = axis_angle_from_quat(self.tag_reprojected.orientation)
-            return np.linalg.norm(np.array([x1-x2, y1-y2, z1-z2, s1-s2]))
+            return np.linalg.norm(np.array([s1*x1-s2*x2, s1*y1-s2*y2, s1*z1-s2*z2]))
         elif method == 'ANGLE_SHORTEST_PATH':
             # Get angle along shortest path between quaternions:
             return get_angle_shortest_path(self.tag_reprojected.orientation, 
