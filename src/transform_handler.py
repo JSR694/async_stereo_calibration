@@ -1,8 +1,11 @@
 #!/usr/bin/env python
 
+#TODO doesn't roslaunch (ros can't find this node).
+#TODO load parameters.
+
 ################################################################################
 #
-#   Publishes the static transform from bumblebee --> xtion.
+#   Publishes the static transform from cam1 --> cam2.
 #
 ################################################################################
 
@@ -29,6 +32,7 @@ class StereoTFPublisher(object):
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
             if self.tf_R is not None and self.tf_T is not None :
+                print "sending tf! ", self.tf_T, self.tf_R
                 self.br.sendTransform(self.tf_T, self.tf_R, rospy.Time.now(),
                         self.cam1_frame, self.cam2_frame)
             rate.sleep()

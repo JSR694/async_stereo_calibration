@@ -1,20 +1,22 @@
 <?xml version="1.0" encoding="ISO-8859-15"?>
 
 <launch>
-    <remap from="cam1" to="/bumblebee/left/image_rect">
-    <remap from="cam2" to="/xtion/rgb/image_rect_mono">
+    <remap from="cam1" to="/bumblebee/left/image_rect"/>
+    <remap from="cam2" to="/xtion/rgb/image_rect_mono"/>
     
     <!-- Run apriltag detection for each camera: -->
-    <node pkg="apriltags_ros" type="apriltag_detector_node" name="cam1_apriltag_detector" output="screen" respawn="true">
+    <node pkg="apriltags_ros" type="apriltag_detector_node" name="cam1_apriltag_detector" ns="cam1" output="screen" respawn="true">
         <rosparam param="tag_descriptions">[
             {id: 93, size: 0.163513, frame_id: bumblebee_frame}]
         </rosparam>
-        <remap from="image_rect" to="cam1">
+        <remap from="camera_info" to="/bumblebee/left/camera_info"/>
+        <remap from="image_rect" to="cam1"/>
     </node>
-    <node pkg="apriltags_ros" type="apriltag_detector_node" name="cam2_apriltag_detector" output="screen" respawn="true">
+    <node pkg="apriltags_ros" type="apriltag_detector_node" name="cam2_apriltag_detector" ns="cam2" output="screen" respawn="true">
         <rosparam param="tag_descriptions">[
             {id: 93, size: 0.163513, frame_id: xtion_frame}]
         </rosparam>
+        <remap from="camera_info" to="/xtion/rgb/camera_info"/>
         <remap from="image_rect" to="cam2"/>
     </node>
 </launch>
