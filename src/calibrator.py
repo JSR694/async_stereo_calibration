@@ -42,13 +42,13 @@ class AsyncStereoCalibrator(object):
             cam1_do_undistort = False, cam2_do_undistort = False,
             board_dim = (8,10), board_size = .02,
             load_calib_data = False, save_calib_data = True,
-            save_imgs = False, 
+            save_calib_imgs = False, 
             load_data_dir = "/tmp/", save_data_dir = "/tmp/"):
         self.load_calib_data = load_calib_data
         self.save_calib_data = save_calib_data
         self.load_data_dir = load_data_dir
         self.save_data_dir = save_data_dir
-        self.save_imgs = save_imgs
+        self.save_calib_imgs = save_calib_imgs
         self.cam1_K = cam1_K
         self.cam1_D = cam1_D
         self.cam2_K = cam2_K
@@ -97,6 +97,25 @@ class AsyncStereoCalibrator(object):
         self.leader_calib_frame_chessboard = None
         self.follower_frame_buffer = []
         
+        if self.save_calib_imgs:
+            tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
+            # Directory for saving images:
+            img_dir = self.save_data_dir + "imgs_" + tstamp
+            os.mkdir(img_dir)
+        '''
+        if self.save_calib_imgs:
+            # Save imgs as lossless .pngs:
+            img_dir = self.save_data_dir + "imgs_" + tstamp
+            print "SAVING CAM1, 2 IMAGES in new directory %s:" % img_dir
+            os.mkdir(img_dir)
+            i = 0
+            for cam1, cam2 in self.stereo_correspondences:
+                img1, img2 = cam1[0], cam2[0]
+                cv2.imwrite(img_dir+ "cam1_%.png" % i, img1,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                cv2.imwrite(img_dir+ "cam2_%.png" % i, img2,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                i +=1
+            print "WROTE %s IMAGES, FOR EACH CAMERA" % i
+        '''
         # Var.s for dynamic load balancing:
         self.cam1_last_frame_time = None
         self.cam2_last_frame_time = None
@@ -157,6 +176,24 @@ class AsyncStereoCalibrator(object):
             self.stereo_correspondences.append( (leader, follower) )
         else:
             self.stereo_correspondences.append( (follower, leader) )
+
+        if self.save_calib_imgs:
+            # Save imgs as lossless .pngs:
+            tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
+            img_dir = self.save_data_dir + "imgs_" + tstamp
+            print "SAVING CAM1, 2 IMAGE in directory %s:" % img_dir
+            if self.leader_id == 1:
+                cv2.imwrite(img_dir+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
+                        self.leader_calib_frame_img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                cv2.imwrite(img_dir+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
+                        img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
+            else:
+                cv2.imwrite(img_dir+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
+                        img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                cv2.imwrite(img_dir+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
+                        self.leader_calib_frame_img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
+
+
         self.last_correspondence_time = timestamp 
         self.reset_correspondence_search()
         
@@ -233,9 +270,9 @@ class AsyncStereoCalibrator(object):
             self.leader_calib_frame_img = cv_image
             self.leader_calib_frame_time = img_msg.header.stamp
             self.leader_calib_frame_chessboard = corners
-            cv2.drawChessboardCorners(scrib,
-                    (self.n_board_rows, self.n_board_cols), 
-                    downsampled_corners, True)
+            #cv2.drawChessboardCorners(scrib,
+            #        (self.n_board_rows, self.n_board_cols), 
+            #        downsampled_corners, True)
             self.need_follower_calib_frame = True
         # Convert cv img to img msg and publish:
         if cam == 1:
@@ -512,19 +549,6 @@ class AsyncStereoCalibrator(object):
                 print "\tCAM1 PTS: %s" % cam1_file
                 numpy.save(cam2_file,cam2_ipts)
                 print "\tCAM2 PTS: %s" % cam2_file
-                if self.save_imgs:
-                    # Save imgs as lossless .pngs:
-                    img_dir = self.save_data_dir + "imgs_" + tstamp
-                    print "SAVING CAM1, 2 IMAGES in new directory %s:" % img_dir
-                    os.mkdir(img_dir)
-                    i = 0
-                    for cam1, cam2 in self.stereo_correspondences:
-                        img1, img2 = cam1[0], cam2[0]
-                        cv2.imwrite(img_dir+ "cam1_%.png" % i, img1,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                        cv2.imwrite(img_dir+ "cam2_%.png" % i, img2,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                        i +=1
-                    print "WROTE %s IMAGES, FOR EACH CAMERA" % i
-
 
         return cam1_ipts, cam2_ipts, b
 
@@ -560,12 +584,15 @@ def start_calibrator():
     save_calib_data = rospy.get_param('~save_calib_data')
     load_data_dir = rospy.get_param('~load_data_dir')
     save_data_dir = rospy.get_param('~save_data_dir')
+    save_imgs = rospy.get_param('~save_calib_imgs')
+
 
     calibrator = AsyncStereoCalibrator("cam1_feed","cam2_feed", 
             cam1['K'], cam1['D'],cam2['K'], cam2['D'],
             board_dim = (board_rows, board_cols), board_size = board_size,
             load_calib_data = load_calib_data,
             save_calib_data = save_calib_data,
+            save_calib_imgs = save_imgs,
             load_data_dir = load_data_dir,
             save_data_dir = save_data_dir)
     rospy.spin()
