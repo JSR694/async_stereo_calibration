@@ -18,6 +18,7 @@ import numpy as np
 import numpy.matlib
 import cv2
 import sys
+import os # for directory creation when saving data.
 import rospy
 import genpy
 import tf
@@ -41,11 +42,13 @@ class AsyncStereoCalibrator(object):
             cam1_do_undistort = False, cam2_do_undistort = False,
             board_dim = (8,10), board_size = .02,
             load_calib_data = False, save_calib_data = True,
+            save_imgs = False, 
             load_data_dir = "/tmp/", save_data_dir = "/tmp/"):
         self.load_calib_data = load_calib_data
         self.save_calib_data = save_calib_data
         self.load_data_dir = load_data_dir
         self.save_data_dir = save_data_dir
+        self.save_imgs = save_imgs
         self.cam1_K = cam1_K
         self.cam1_D = cam1_D
         self.cam2_K = cam2_K
@@ -509,6 +512,19 @@ class AsyncStereoCalibrator(object):
                 print "\tCAM1 PTS: %s" % cam1_file
                 numpy.save(cam2_file,cam2_ipts)
                 print "\tCAM2 PTS: %s" % cam2_file
+                if self.save_imgs:
+                    # Save imgs as lossless .pngs:
+                    img_dir = self.save_data_dir + "imgs_" + tstamp
+                    print "SAVING CAM1, 2 IMAGES in new directory %s:" % img_dir
+                    os.mkdir(img_dir)
+                    i = 0
+                    for cam1, cam2 in self.stereo_correspondences:
+                        img1, img2 = cam1[0], cam2[0]
+                        cv2.imwrite(img_dir+ "cam1_%.png" % i, img1,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                        cv2.imwrite(img_dir+ "cam2_%.png" % i, img2,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                        i +=1
+                    print "WROTE %s IMAGES, FOR EACH CAMERA" % i
+
 
         return cam1_ipts, cam2_ipts, b
 
