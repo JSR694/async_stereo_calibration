@@ -42,13 +42,14 @@ class AsyncStereoCalibrator(object):
             cam1_do_undistort = False, cam2_do_undistort = False,
             board_dim = (8,10), board_size = .02,
             load_calib_data = False, save_calib_data = True,
-            save_calib_imgs = False, 
+            save_calib_imgs = False, load_calib_imgs = True,
             load_data_dir = "/tmp/", save_data_dir = "/tmp/"):
         self.load_calib_data = load_calib_data
         self.save_calib_data = save_calib_data
-        self.load_data_dir = load_data_dir
+        self.load_data_dir = load_data_dir  # do calib from image points
         self.save_data_dir = save_data_dir
         self.save_calib_imgs = save_calib_imgs
+        self.load_calib_imgs = load_calib_imgs # do calib from raw images (no points)
         self.cam1_K = cam1_K
         self.cam1_D = cam1_D
         self.cam2_K = cam2_K
@@ -61,7 +62,11 @@ class AsyncStereoCalibrator(object):
         #self.MAX_CORRESPONDENCE_LAG = genpy.Duration.from_sec(.1)
         self.MAX_CORRESPONDENCE_LAG = .05
         # Min duration between successive correspondences:
-        self.MIN_DELAY_BETWEEN_CORRESPONDENCES = genpy.Duration.from_sec(1)
+        self.MIN_DELAY_BETWEEN_CORRESPONDENCES = genpy.Duration.from_sec(9)
+        # TODO put me somewhere sensible:
+        # time since usr was last updated about time til next frame:
+        self.last_update_time = -1
+        self.save_img_path = False  # created dir for saving imgs
         # Make sure n_cols > n_rows to agree with OpenCV CB detector output:
         self.n_board_cols = max(board_dim)
         self.n_board_rows = min(board_dim)
@@ -97,11 +102,6 @@ class AsyncStereoCalibrator(object):
         self.leader_calib_frame_chessboard = None
         self.follower_frame_buffer = []
         
-        if self.save_calib_imgs:
-            tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
-            # Directory for saving images:
-            img_dir = self.save_data_dir + "imgs_" + tstamp
-            os.mkdir(img_dir)
         '''
         if self.save_calib_imgs:
             # Save imgs as lossless .pngs:
@@ -162,6 +162,7 @@ class AsyncStereoCalibrator(object):
         self.leader_calib_frame_img = None
         self.leader_calib_frame_chessboard = None
         self.follower_frame_buffer = []
+        self.last_update_time = -1
 
     def store_stereo_correspondence(self, img, corners, timestamp, dt):
         print "Storing correspondence!  dt:\t%s" % str(dt)
@@ -178,19 +179,25 @@ class AsyncStereoCalibrator(object):
             self.stereo_correspondences.append( (follower, leader) )
 
         if self.save_calib_imgs:
+            # Make dir for saving imgs if it doesn't exist:
+            if self.save_img_path is None:
+                tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
+                img_dir = self.save_data_dir + "imgs_" + tstamp
+                if not os.path.exists(img_dir):
+                    os.mkdir(img_dir)
+                self.save_img_path = img_dir
+
             # Save imgs as lossless .pngs:
-            tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
-            img_dir = self.save_data_dir + "imgs_" + tstamp
-            print "SAVING CAM1, 2 IMAGE in directory %s:" % img_dir
+            print "SAVING CAM1, 2 IMAGE in directory %s:" % self.save_img_path
             if self.leader_id == 1:
-                cv2.imwrite(img_dir+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
+                cv2.imwrite(self.save_img_path+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
                         self.leader_calib_frame_img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                cv2.imwrite(img_dir+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
+                cv2.imwrite(self.save_img_path+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
                         img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
             else:
-                cv2.imwrite(img_dir+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
+                cv2.imwrite(self.save_img_path+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
                         img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                cv2.imwrite(img_dir+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
+                cv2.imwrite(self.save_img_path+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
                         self.leader_calib_frame_img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
 
 
@@ -244,6 +251,13 @@ class AsyncStereoCalibrator(object):
         if (self.need_follower_calib_frame or
                 img_msg.header.stamp - self.last_correspondence_time < \
                         self.MIN_DELAY_BETWEEN_CORRESPONDENCES):
+            print 
+            print "NEXT FRAME IN %f" % (self.MIN_DELAY_BETWEEN_CORRESPONDENCES.to_sec() - (img_msg.header.stamp.to_sec() - self.last_correspondence_time.to_sec()))
+
+            #if (img_msg.header.stamp - self.last_update_time > 1 or
+            #        img_msg.header.stamp - self.last_update_time == -1):
+            #    n = self.MIN_DELAY_BETWEEN_CORRESPONDENCES - img_msg.header.stamp - self.last_correspondence_time
+            #    print "NEXT CALIB FRAME IN %ss:" % n
             return
 
         # Convert img message to opencv img:
@@ -504,18 +518,49 @@ class AsyncStereoCalibrator(object):
         cam1_ipts, cam2_ipts, b = None, None, None
         
         if self.load_calib_data: ### Load data from save_data_dir:
-            try:
-                print "Attempting to load data from %s" % self.load_data_dir
-                print "  Looking for %s" % self.load_data_dir + "board_pts.npy"
-                b = np.load(self.load_data_dir + "board_pts.npy")
-                print "  Looking for %s" % self.load_data_dir + "cam1_pts.npy"
-                cam1_ipts = np.load(self.load_data_dir + "cam1_pts.npy")
-                print "  Looking for %s" % self.load_data_dir + "cam2_pts.npy"
-                cam2_ipts = np.load(self.load_data_dir + "cam2_pts.npy")
-                print "Loading successful!"
-            except IOError:
-                print "FAILED TO FIND SAVED DATA!"
-                sys.exit(["Exited on load failure."])
+            if self.load_calib_imgs:
+                # TODO img dir set by param:
+                img_dir = "/tmp/imgs_2016-04-01-16-21-47"
+                print "Attempting to load images from %s:"
+                cam1_filenames = filter(lambda s: "cam1_" in s, os.listdir(img_dir))
+                cam2_filenames = filter(lambda s: "cam2_" in s, os.listdir(img_dir))
+                cam1_filenames.sort(key=lambda s: int(s[5:s.index('.png')]))
+                cam2_filenames.sort(key=lambda s: int(s[5:s.index('.png')]))
+                img_pairs_filenames = zip(cam1_filenames, cam2_filenames)
+                cam1_ipts_list, cam2_ipts_list = [], []
+
+                for cam1_file, cam2_file in img_pairs_filenames:
+                    cam1_img = cv2.imread(img_dir + "/" + cam1_file, 0)
+                    cam2_img = cv2.imread(img_dir + "/" + cam2_file, 0)
+                    cam2_img = cv2.flip(cam2_img, -1)
+                    scrib, corners, downsampled_corners, scales = self.downsample_and_detect(cam1_img)
+                    if corners is not None:
+                        print "Found corners in cam1 img!  Checking cam2:"
+                        scrib2, corners2, downsampled_corners2, scales2 = self.downsample_and_detect(cam1_img)
+                        if corners2 is None:
+                            print "Could not find corners in cam2 img."
+                            continue
+                        print "Found corners in cam2 img!  ADDING PAIR TO LIST."
+                        cam1_ipts_list.append(corners)
+                        cam2_ipts_list.append(corners2)
+                    else:  # If corners not found in cam1
+                        continue
+                cam1_ipts = np.array(cam1_ipts_list)
+                cam2_ipts = np.array(cam2_ipts_list)
+                b = np.array([self.CHESSBOARD[0] for i in range(len(cam1_ipts))])
+            else:
+                try:
+                    print "Attempting to load data from %s" % self.load_data_dir
+                    print "  Looking for %s" % self.load_data_dir + "board_pts.npy"
+                    b = np.load(self.load_data_dir + "board_pts.npy")
+                    print "  Looking for %s" % self.load_data_dir + "cam1_pts.npy"
+                    cam1_ipts = np.load(self.load_data_dir + "cam1_pts.npy")
+                    print "  Looking for %s" % self.load_data_dir + "cam2_pts.npy"
+                    cam2_ipts = np.load(self.load_data_dir + "cam2_pts.npy")
+                    print "Loading successful!"
+                except IOError:
+                    print "FAILED TO FIND SAVED DATA!"
+                    sys.exit(["Exited on load failure."])
         else: ### Create calib point arrays from captured correspondencies:
             # each elem in stereo_corr.s: (cam1_frame, cam2_frame)
             # each cam#_frame: (img, corners, timestamp)

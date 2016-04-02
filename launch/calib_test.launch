@@ -39,9 +39,9 @@
         <param name ="board_cols" value="8"/>
         <param name ="board_size" value=".028"/>
 
-        <param name ="load_calib_data" value="False"/>
-        <param name ="save_calib_data" value="True"/>
-        <param name ="save_calib_imgs" value="True"/>
+        <param name ="load_calib_data" value="True"/>
+        <param name ="save_calib_data" value="False"/>
+        <param name ="save_calib_imgs" value="False"/>
         <param name ="load_data_dir" value="/home/baxter/Desktop/stereo_correspondencies_67/"/>
         <param name ="save_data_dir" value="/tmp/"/>
     </node>
