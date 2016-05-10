@@ -3,7 +3,8 @@
 """
 Wrapper client class that communicates with the apriltags_ros package to
 store tag information (images, pose, corners).
-Written by Alex Zhu (alexzhu(at)seas.upenn.edu)
+Based on code by Alex Zhu (alexzhu(at)seas.upenn.edu).
+Adapted for general use by Jack Rasiel (jrasiel(at)haverford.edu).
 """
 
 import roslib
@@ -19,7 +20,7 @@ from sensor_msgs.msg import JointState
 from cv_bridge import CvBridge, CvBridgeError
 from tf.transformations import *
 from apriltags_ros.msg import AprilTagDetectionArray
-from utility import *
+#from utility import *
 from datetime import datetime
 
 from std_msgs.msg import (
@@ -41,15 +42,15 @@ class AprilTagClient(object):
     store tag information (images, pose, corners).
     """
     def __init__(self):
-        self.hand_image = None
-        self.image = None
+        self.cam2_image = None
+        self.cam1_image = None
 
         self._bridge = CvBridge()
         self._num_saved=0
 
         # ROS Pubs and Subs
-        rospy.Subscriber("/bumblebee/left/image_rect",Image,self.__get_image)
-        rospy.Subscriber("/xtion/rgb/image_rect_mono",Image,self.__get_hand_image)
+        rospy.Subscriber("/usb_cam1/image_raw",Image,self.__get_cam1_image)
+        rospy.Subscriber("/usb_cam2/image_raw",Image,self.__get_cam2_image)
         self.listener = tf.TransformListener()
         cv2.namedWindow("Cam1",0)
         cv2.namedWindow("Cam2",0)
@@ -63,32 +64,32 @@ class AprilTagClient(object):
         self.save_dir = img_dir
 
 
-    def __get_image(self,image):
+    def __get_cam1_image(self,image):
         """
         # Dummy function to save incoming images
         """
         try:
             cv_image=self._bridge.imgmsg_to_cv2(image,"bgr8")
-            self.image=cv_image
+            self.cam1_image=cv_image
         except CvBridgeError, e:
             print e
 
-    def __get_hand_image(self,image):
+    def __get_cam2_image(self,image):
         """
         # Dummy function to save incoming images
         """
         try:
             cv_image=self._bridge.imgmsg_to_cv2(image,"bgr8")
-            self.hand_image=cv_image
+            self.cam2_image=cv_image
         except CvBridgeError, e:
             print e
 
     def show_image(self):
-        if self.image is None or self.hand_image is None:
+        if self.cam1_image is None or self.cam2_image is None:
             return
         try:
-            cv2.imshow("Cam1",self.image)
-            cv2.imshow("Cam2",self.hand_image)
+            cv2.imshow("Cam1",self.cam1_image)
+            cv2.imshow("Cam2",self.cam2_image)
             user_input=cv2.waitKey(50)
         except:
             user_input=-1
@@ -97,9 +98,9 @@ class AprilTagClient(object):
             
         # Key code for 'ENTER'
         if user_input == 1048586:
-            cv2.imwrite(self.save_dir + '/cam1_{0}.png'.format(self._num_saved), self.image)
+            cv2.imwrite(self.save_dir + '/cam1_{0}.png'.format(self._num_saved), self.cam1_image)
             print "Successfully wrote " + self.save_dir + '/cam1_{0}.png'.format(self._num_saved) + "to file."
-            cv2.imwrite(self.save_dir + '/cam2_{0}.png'.format(self._num_saved), self.hand_image)
+            cv2.imwrite(self.save_dir + '/cam2_{0}.png'.format(self._num_saved), self.cam2_image)
             print "Successfully wrote " + self.save_dir + '/cam2_{0}.png'.format(self._num_saved) + "to file."
             self._num_saved=self._num_saved+1	
 

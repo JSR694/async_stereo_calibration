@@ -1,28 +1,30 @@
 <?xml version="1.0" encoding="ISO-8859-15"?>
 
 <launch>
-    <remap from="cam1_feed" to="/bumblebee/left/image_rect"/>
-    <remap from="cam2_feed" to="/xtion/rgb/image_rect_mono"/>
+    <remap from="cam1_feed" to="/usb_cam1/image_raw"/>
+    <remap from="cam2_feed" to="/usb_cam2/image_raw"/>
 
     <!-- CAMERA PARAMETERS: -->
     <group ns="cam1"> <!-- BUMBLEBEE -->
         <rosparam param="K">[
-            [811.857711829874, 0.0, 515.7504920959473],
-            [0.0, 811.857711829874, 403.7249565124512],
-            [0.0, 1.0, 0.0]
+            [ 632.85491462,    0.0,          283.47834341],
+            [   0.0,          629.64656814,  228.96609837],
+            [   0.0,            0.0,            1.0        ]
             ]
         </rosparam>
         <rosparam param="D">[[0.0], [0.0], [0.0], [0.0], [0.0]]</rosparam>
         <param name="do_undistort" value="False"/>
         <param name="do_img_flip" value="False"/>
         <param name="img_flip_type" value="-1"/> <!-- arg for cv2.flip -->
+        <param name="do_mono_calib" value="True"/>
+        <param name="is_upside_down" value="True"/>
     </group> 
 
     <group ns="cam2"> <!-- XTION -->
         <rosparam param="K">[
-            [ 552.24642152, 0.0, 325.71609566],
-            [0.0, 549.55314454, 236.11290228],
-            [0.0, 0.0, 1.0]
+            [ 978.15197925,    0.0,          624.15619   ],
+            [   0.0,          889.83025978,  356.82512209],
+            [   0.0,            0.0,            1.0,        ]
             ]
         </rosparam>
         <rosparam param="D">[
@@ -32,21 +34,29 @@
         <param name="do_undistort" value="False"/>
         <param name="do_img_flip" value="False"/>
         <param name="img_flip_type" value="-1"/> <!-- arg for cv2.flip -->
+        <param name="do_mono_calib" value="True"/>
+        <param name="is_upside_down" value="False"/>
     </group>
 
+    <include file="$(find async_stereo_calibration)/launch/bothcams.launch"/>
     <node pkg="async_stereo_calibration" type="keypress.py" name="keypress_publisher" output="screen"/>
     <node pkg="async_stereo_calibration" type="calibrator.py" name="stereo_calibrator" output="screen">
         <param name ="board_rows" value="6"/>
         <param name ="board_cols" value="8"/>
-        <param name ="board_size" value=".028"/>
+        <param name ="board_size" value=".025"/>
 
-        <param name ="load_calib_data" value="True"/>
-        <param name ="save_calib_data" value="False"/>
+        <param name ="load_calib_data" value="True"/> 
+        <param name ="load_calib_imgs" value="True"/>
+        <param name ="save_calib_data" value="True"/>
         <param name ="save_calib_imgs" value="False"/>
-        <param name ="load_data_dir" value="/home/baxter/Desktop/stereo_correspondencies_67/"/>
+        <param name ="load_data_dir" 
+            value="/tmp/calib_2016-05-10-16-15-33/"/>
         <param name ="save_data_dir" value="/tmp/"/>
+
         <param name ="save_calib_results" value="True"/>
-        <param name ="manual_image_capture" value="True"/>
+        <param name ="manual_frame_capture" value="True"/>
     </node>
-    <node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/>
+    <!-- node pkg="async_stereo_calibration" type="transform_handler.py" name="transform_handler" output="screen" respawn="true"/-->
 </launch>
+
+

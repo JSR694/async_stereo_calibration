@@ -6,29 +6,32 @@
 #
 # Some functionality based on the ROS camera_calibration package K, D)
 #  Specifically, downsampling-based checkerboard detection, [others?]
-# To stop gathering frames and perform R,T estimation, press "q" while
-#   in either camera feed window.
+# To stop gathering frames and perform R,T estimation, 
+#   close either camera feed window.
 #
 # TODO: implement flags for rotating new frames.
+# TODO: replace prints with appropriate ros log calls.
 ################################################################################
 
-import roslib
 import math
 import numpy as np
 import numpy.matlib
+import yaml 
 import cv2
 import sys
 import os # for directory creation when saving data.
+import roslib
 import rospy
 import genpy
 import tf
 from datetime import datetime # for file timestamp
-from async_stereo_calibration.srv import *
+from distutils.version import LooseVersion
+#from async_stereo_calibration.srv import *
 from std_msgs.msg import Int32
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose, Point, Quaternion
+from std_srvs.srv import Trigger
 from cv_bridge import CvBridge, CvBridgeError
-from distutils.version import LooseVersion
 
 def pdist(p1, p2):
     """
@@ -40,45 +43,62 @@ class AsyncStereoCalibrator(object):
     def __init__(self, cam1_topic_name, cam2_topic_name, 
             cam1_K, cam1_D, cam2_K, cam2_D, 
             cam1_do_undistort = False, cam2_do_undistort = False,
+            cam1_is_upside_down = False, cam2_is_upside_down = False,
             board_dim = (8,10), board_size = .02,
+            cam1_do_mono_calib = False, cam2_do_mono_calib = False,
             load_calib_data = False, save_calib_data = True,
-            save_calib_imgs = False, load_calib_imgs = True,
+            save_calib_imgs = False, load_calib_imgs = False,
+            save_calib_results = False, manual_frame_capture = True,
             load_data_dir = "/tmp/", save_data_dir = "/tmp/"):
         self.load_calib_data = load_calib_data
         self.save_calib_data = save_calib_data
         self.load_data_dir = load_data_dir  # do calib from image points
-        self.save_data_dir = save_data_dir
+        
+        self.save_data_dir = save_data_dir + \
+                "calib_" + datetime.now().strftime("%Y-%m-%d-%y-%H-%M") + "/"
+        if not os.path.exists(self.save_data_dir):
+            print "Creating dir for saving data: %s" % self.save_data_dir
+            os.makedirs(self.save_data_dir)
         self.save_calib_imgs = save_calib_imgs
         self.load_calib_imgs = load_calib_imgs # do calib from raw images (no points)
+        self.manual_frame_capture = manual_frame_capture
+        self.save_calib_results = save_calib_results
         self.cam1_K = cam1_K
         self.cam1_D = cam1_D
         self.cam2_K = cam2_K
         self.cam2_D = cam2_D
         self.cam1_do_undistort = cam1_do_undistort
         self.cam2_do_undistort = cam2_do_undistort
+        self.cam1_do_mono_calib = cam1_do_mono_calib 
+        self.cam2_do_mono_calib = cam2_do_mono_calib 
+        self.cam1_is_upside_down = cam1_is_upside_down
+        self.cam2_is_upside_down = cam2_is_upside_down
+        if cam1_is_upside_down and cam2_is_upside_down:
+            rospy.logerr("Cam1 and Cam2 are both flagged as being upside down.\n"\
+                    "\tBoth cameras cannot be upside-down relative to each other.")
+            return
 
         ### CONSTANTS: 
         # Max allowed time gap between two camera frames in a correspondence:
         #self.MAX_CORRESPONDENCE_LAG = genpy.Duration.from_sec(.1)
         self.MAX_CORRESPONDENCE_LAG = .05
         # Min duration between successive correspondences:
-        self.MIN_DELAY_BETWEEN_CORRESPONDENCES = genpy.Duration.from_sec(9)
-        # TODO put me somewhere sensible:
-        # time since usr was last updated about time til next frame:
-        self.last_update_time = -1
-        self.save_img_path = False  # created dir for saving imgs
-        # Make sure n_cols > n_rows to agree with OpenCV CB detector output:
-        self.n_board_cols = max(board_dim)
-        self.n_board_rows = min(board_dim)
-        # Length of one chessboard square, in meters.
-        #  Default (2cm) is from Alex's chessboard:
+        self.MIN_DELAY_BETWEEN_CORRESPONDENCES = genpy.Duration.from_sec(1)
+        # Length of one chessboard square, in meters.  Default .02
         self.CHESSBOARD_SIZE = board_size
-        self.size = None #img size.  A param for cv2.stereoCalib.
+        # Make sure n_cols > n_rows to agree with OpenCV CB detector output:
+        self.N_BOARD_COLS = max(board_dim)
+        self.N_BOARD_ROWS = min(board_dim)
         # Generate chessboard corner loc.s, in chessboard frame:
         self.CHESSBOARD = self.mk_object_points(use_board_size = True)
+        # Timeout for user requesting frame capture:
+        self.KEYPRESS_TIMEOUT = rospy.Duration(.25)
+
+        self.cam1_size = None
+        self.cam2_size = None
+        
 
         self.cam1_topic_name, self.cam2_topic_name = cam1_topic_name, cam2_topic_name
-
         ### WHAT WE WANNA FIND:
         self.R, self.T = None, None
         self.calibrated = False
@@ -101,21 +121,12 @@ class AsyncStereoCalibrator(object):
         self.leader_calib_frame_img = None
         self.leader_calib_frame_chessboard = None
         self.follower_frame_buffer = []
+        # For manual frame capture:
+        self.frame_requested = False
+        self.frame_request_time = rospy.Duration(0)
+
+        self.block_leader_callback = False # TODO shameful kludge
         
-        '''
-        if self.save_calib_imgs:
-            # Save imgs as lossless .pngs:
-            img_dir = self.save_data_dir + "imgs_" + tstamp
-            print "SAVING CAM1, 2 IMAGES in new directory %s:" % img_dir
-            os.mkdir(img_dir)
-            i = 0
-            for cam1, cam2 in self.stereo_correspondences:
-                img1, img2 = cam1[0], cam2[0]
-                cv2.imwrite(img_dir+ "cam1_%.png" % i, img1,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                cv2.imwrite(img_dir+ "cam2_%.png" % i, img2,  (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                i +=1
-            print "WROTE %s IMAGES, FOR EACH CAMERA" % i
-        '''
         # Var.s for dynamic load balancing:
         self.cam1_last_frame_time = None
         self.cam2_last_frame_time = None
@@ -126,7 +137,7 @@ class AsyncStereoCalibrator(object):
         self.leader_id = 1
         
         # Service for publishing the calculated transform:
-        self.publish_stereo_tf = rospy.ServiceProxy('set_stereo_tf', SetStereoTF)
+        #self.publish_stereo_tf = rospy.ServiceProxy('set_stereo_tf', SetStereoTF)
 
         # Calibrate using recorded point correspondencies, or capture new ones:
         if self.load_calib_data:
@@ -138,31 +149,39 @@ class AsyncStereoCalibrator(object):
                     Image, self.timestamp_register_cam1, queue_size=1)
             self.cam2_sub = rospy.Subscriber(self.cam2_topic_name, 
                     Image, self.timestamp_register_cam2, queue_size=1)
-            # Republish camera images as OpenCV images, to be displayed by 
-            #   another node:
-            # TODO topic naming convention too cumbersome?
-            self.cam1_pub_topic = self.cam1_topic_name + "_cv_img"
-            self.cam2_pub_topic = self.cam2_topic_name + "_cv_img"
-            print "PUBLISHING TO:"
-            print self.cam1_pub_topic
-            print self.cam2_pub_topic     
-            self.cam1_pub = rospy.Publisher(self.cam1_pub_topic,Image,
-                    queue_size = 3)
-            self.cam2_pub = rospy.Publisher(self.cam2_pub_topic,Image,
-                    queue_size = 3)
-            
-            #Try to initiate calibration using correspondencies.
-            rospy.on_shutdown(self.cal_fromcorners)
+            # For manual frame capture, activate keypress publishing node:
+            self.keypress_sub = None
+            if self.manual_frame_capture:
+                print "Waiting for keypress publisher service...",
+                rospy.wait_for_service("publish_keypresses")
+                print " found it."
+                self.activate_keypress_publisher = rospy.ServiceProxy('publish_keypresses', Trigger)
+                self.activate_keypress_publisher()
+                self.keypress_sub = rospy.Subscriber("keypresses", Int32,
+                        self.keypress_callback, queue_size=1)
 
+            # Calibrate on shutdown:
+            rospy.on_shutdown(self.cal_fromcorners)
+    
+    def keypress_callback(self, keypress):
+        #keypress = keypress.data
+        print "Keypress detected.  Saving next frame."
+        self.frame_requested = True
+        self.frame_request_time = rospy.Time.now()
+
+    # Reset state for image correspondence search.
     def reset_correspondence_search(self):
-        print "TOTAL CORRESPONDENCES FOUND:\t", str(len(self.stereo_correspondences))
-        print
+        self.frame_requested = False
         self.need_follower_calib_frame = False 
         self.leader_calib_frame_time = None
         self.leader_calib_frame_img = None
         self.leader_calib_frame_chessboard = None
         self.follower_frame_buffer = []
-        self.last_update_time = -1
+
+        self.frame_request_time = rospy.Duration(0)
+        print "TOTAL CORRESPONDENCES FOUND:\t", str(len(self.stereo_correspondences))
+        print
+
 
     def store_stereo_correspondence(self, img, corners, timestamp, dt):
         print "Storing correspondence!  dt:\t%s" % str(dt)
@@ -179,26 +198,19 @@ class AsyncStereoCalibrator(object):
             self.stereo_correspondences.append( (follower, leader) )
 
         if self.save_calib_imgs:
-            # Make dir for saving imgs if it doesn't exist:
-            if self.save_img_path is None:
-                tstamp = datetime.now().strftime("%Y-%m-%d-%y-%H-%M")
-                img_dir = self.save_data_dir + "imgs_" + tstamp
-                if not os.path.exists(img_dir):
-                    os.mkdir(img_dir)
-                self.save_img_path = img_dir
-
-            # Save imgs as lossless .pngs:
-            print "SAVING CAM1, 2 IMAGE in directory %s:" % self.save_img_path
+            # Save imgs:
+            print "SAVING CAM1, 2 IMAGE in directory %s:" % self.save_data_dir
+            cam1_filename= self.save_data_dir+ "cam1_%02d.png" % \
+                    len(self.stereo_correspondences)-1
+            cam2_filename= self.save_data_dir+ "cam2_%02d.png" % \
+                    len(self.stereo_correspondences)-1
+            flag = (cv2.IMWRITE_PNG_COMPRESSION, 0)
             if self.leader_id == 1:
-                cv2.imwrite(self.save_img_path+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
-                        self.leader_calib_frame_img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                cv2.imwrite(self.save_img_path+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
-                        img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                cv2.imwrite(cam1_filename,self.leader_calib_frame_img, flag)
+                cv2.imwrite(cam2_filename,self.follower_calib_frame_img, flag)
             else:
-                cv2.imwrite(self.save_img_path+ "/cam1_" + str(len(self.stereo_correspondences)) + ".png",
-                        img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
-                cv2.imwrite(self.save_img_path+ "/cam2_" + str(len(self.stereo_correspondences)) + ".png",
-                        self.leader_calib_frame_img, (cv2.IMWRITE_PNG_COMPRESSION, 0))
+                cv2.imwrite(cam2_filename,self.leader_calib_frame_img, flag)
+                cv2.imwrite(cam1_filename,self.follower_calib_frame_img, flag)
 
 
         self.last_correspondence_time = timestamp 
@@ -240,36 +252,59 @@ class AsyncStereoCalibrator(object):
             self.callback_leader(img_msg, cam)
         else:
             self.callback_follower(img_msg, cam)
-
+    
+    # TODO Kludge to make sure leader callback isn't run concurrently
     def callback_leader(self,img_msg, cam):
+        if self.block_leader_callback:
+            return
+        else:
+            self.block_leader_callback = True
+            self.do_callback_leader(img_msg,cam)
+            self.block_leader_callback = False
+
+    def do_callback_leader(self, img_msg, cam):
         # The leader searches each frame received until it detects a chessboard.
         # It then saves that frame, and sets the need_follower_calib_frame flag,
         #  prompting the follower to search for a corresponding frame.
 
-        # Ignore this frame if currently calibrating based on earlier leader frame,
-        #   or not enough time passed since last correspondence:
-        if (self.need_follower_calib_frame or
-                img_msg.header.stamp - self.last_correspondence_time < \
-                        self.MIN_DELAY_BETWEEN_CORRESPONDENCES):
-            print 
-            print "NEXT FRAME IN %f" % (self.MIN_DELAY_BETWEEN_CORRESPONDENCES.to_sec() - (img_msg.header.stamp.to_sec() - self.last_correspondence_time.to_sec()))
+        # For manual capture mode: ignore frame if user hasn't requested 
+        #   a frame, or if user request has timed out:
+        if self.manual_frame_capture:
+            if self.frame_requested:
+                time_since_keypress = rospy.get_rostime() - self.frame_request_time
+                if time_since_keypress > self.KEYPRESS_TIMEOUT:
+                    self.frame_requested = False
+                    self.frame_request_time = rospy.Duration(0)
+                    print "Timed out before finding valid correspondence!"
+                    return
+            else:
+                return
 
-            #if (img_msg.header.stamp - self.last_update_time > 1 or
-            #        img_msg.header.stamp - self.last_update_time == -1):
-            #    n = self.MIN_DELAY_BETWEEN_CORRESPONDENCES - img_msg.header.stamp - self.last_correspondence_time
-            #    print "NEXT CALIB FRAME IN %ss:" % n
+        # Ignore this frame is not enough time passed since last correspondence:
+        too_soon = img_msg.header.stamp - self.last_correspondence_time < \
+                self.MIN_DELAY_BETWEEN_CORRESPONDENCES
+        if too_soon:
+            print "Waiting %fs before looking for more frames." % (self.MIN_DELAY_BETWEEN_CORRESPONDENCES.to_sec() - (img_msg.header.stamp.to_sec() - self.last_correspondence_time.to_sec()))
             return
+        # Ignore this frame if currently calibrating based on earlier leader frame
+        elif self.need_follower_calib_frame:  
+            return
+        else:
+            self.leader_check_for_chessboard(img_msg, cam)
 
+    # Check for chessboard in current frame.
+    #  If chessboard found, start search in other camera.
+    def leader_check_for_chessboard(self, img_msg, cam):
         # Convert img message to opencv img:
         try:
             cv_image = self.bridge.imgmsg_to_cv2(img_msg)
-            if cam == 2:
-                cv_image = cv2.flip(cv_image, -1)
-                if self.cam2_do_undistort:
-                    cv_image = cv2.undistort(cv_image, self.cam2_K, self.cam2_D)
+            if cam == 2: 
+                # Store cam img dimensions:
+                if self.cam2_size is None:
+                    self.cam2_size = cv_image.shape[0:2]
+            elif self.cam1_size is None:
+                self.cam1_size = cv_image.shape[0:2]
 
-            if self.size is None and cam == 2:
-                self.size = cv_image.shape
         except CvBridgeError as e:
             rospy.logfatal("CV_Bridge failed to convert message from %s!" 
                     % self.leader_topic_name)
@@ -285,14 +320,10 @@ class AsyncStereoCalibrator(object):
             self.leader_calib_frame_time = img_msg.header.stamp
             self.leader_calib_frame_chessboard = corners
             #cv2.drawChessboardCorners(scrib,
-            #        (self.n_board_rows, self.n_board_cols), 
+            #        (self.N_BOARD_ROWS, self.N_BOARD_COLS), 
             #        downsampled_corners, True)
             self.need_follower_calib_frame = True
-        # Convert cv img to img msg and publish:
-        if cam == 1:
-            self.cam1_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, '8UC1'))
-        else:
-            self.cam2_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, '8UC1'))
+
 
     def callback_follower(self,img_msg, cam):
         # The follower waits for the need_follower_calib_frame is set, at which
@@ -301,10 +332,6 @@ class AsyncStereoCalibrator(object):
         #  at which point the best correspondence is saved.
         try:
             cv_image = self.bridge.imgmsg_to_cv2(img_msg)
-            if cam == 2:
-                cv_image = cv2.flip(cv_image, -1)
-                if self.cam2_do_undistort:
-                    cv_image = cv2.undistort(cv_image, self.cam2_K, self.cam2_D)
 
         except CvBridgeError as e:
             rospy.logfatal("CV_Bridge failed to convert message from %s!" 
@@ -323,7 +350,7 @@ class AsyncStereoCalibrator(object):
             dt = abs(dt.to_sec())
             # FUN FACT: taking the abs val of a Duration just flips its sign...
             # dt = abs(img_msg.header.stamp - self.leader_calib_frame_time)
-
+            
             if dt <= self.MAX_CORRESPONDENCE_LAG:
                 self.follower_frame_buffer.append(
                         (cv_image, img_msg.header.stamp, dt))
@@ -348,8 +375,8 @@ class AsyncStereoCalibrator(object):
                 if not found_it:
                     print "\tNo calib frame found!  ABORTING SEARCH."
                     self.reset_correspondence_search()
-        # Show frame:
         '''
+        # Show frame:
         dt = img_msg.header.stamp-self.init_time
         dt = dt.to_sec()
         cv2.putText(cv_image, str(dt), 
@@ -359,10 +386,6 @@ class AsyncStereoCalibrator(object):
                 (0,cv_image.shape[0]),
                 cv2.FONT_HERSHEY_SIMPLEX, 3, (0,0,255), 3)
         '''
-        if cam == 1:
-            self.cam1_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, '8UC1'))
-        else:
-            self.cam2_pub.publish(self.bridge.cv2_to_imgmsg(cv_image, '8UC1'))
 
     def downsample_and_detect(self, img):
         """
@@ -372,6 +395,8 @@ class AsyncStereoCalibrator(object):
         Scales the corners back up to the correct size after detection.
 
         Returns (scrib, corners, downsampled_corners, (x_scale, y_scale)).
+
+        This function based on code from the ROS camera calibration package.
         """
         # Scale the input image down to ~VGA size
         height = img.shape[0]
@@ -412,6 +437,7 @@ class AsyncStereoCalibrator(object):
     def get_chessboard_corners(self,img, refine = True, checkerboard_flags=0):
         """
         Use cvFindChessboardCorners to find corners of chessboard in image.
+        This function copied from the ROS camera calibration package.
         """
         h = img.shape[0]
         w = img.shape[1]
@@ -419,7 +445,7 @@ class AsyncStereoCalibrator(object):
             mono = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             mono = img
-        (ok, corners) = cv2.findChessboardCorners(mono, (self.n_board_cols, self.n_board_rows), 
+        (ok, corners) = cv2.findChessboardCorners(mono, (self.N_BOARD_COLS, self.N_BOARD_ROWS), 
                 flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE | checkerboard_flags)
         if not ok:
             return (ok, corners)
@@ -435,42 +461,49 @@ class AsyncStereoCalibrator(object):
             # Use a radius of half the minimum distance between corners. This should be large enough to snap to the
             # correct corner, but not so large as to include a wrong corner in the search window.
             min_distance = float("inf")
-            for row in range(self.n_board_rows):
-                for col in range(self.n_board_cols - 1):
-                    index = row*self.n_board_rows + col
+            for row in range(self.N_BOARD_ROWS):
+                for col in range(self.N_BOARD_COLS - 1):
+                    index = row*self.N_BOARD_ROWS + col
                     min_distance = min(min_distance, pdist(corners[index, 0], corners[index + 1, 0]))
-            for row in range(self.n_board_rows - 1):
-                for col in range(self.n_board_cols):
-                    index = row*self.n_board_rows + col
-                    min_distance = min(min_distance, pdist(corners[index, 0], corners[index + self.n_board_cols, 0]))
+            for row in range(self.N_BOARD_ROWS - 1):
+                for col in range(self.N_BOARD_COLS):
+                    index = row*self.N_BOARD_ROWS + col
+                    min_distance = min(min_distance, pdist(corners[index, 0], corners[index + self.N_BOARD_COLS, 0]))
             radius = int(math.ceil(min_distance * 0.5))
             cv2.cornerSubPix(mono, corners, (radius,radius), (-1,-1),
                                           ( cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1 ))
 
         return (ok, corners)
     
-    # RUN STEREO CALIBRATION
+    # RUN STEREO CALIBRATION (also mono, if specified)
     def cal_fromcorners(self): 
-        #                                , do_mono_calib = False):
-        #if do_mono_calib:
-        #    print
-        #     TODO Perform monocular calibrations
-        #    self.l.cal_fromcorners(cam1_corners)
-        #    self.r.cal_fromcorners(cam2_corners)
-        cam1_ipts, cam2_ipts, b = self.get_calib_data()
+        '''This function based on code from the ROS camera calibration package.'''
+        ret = self.get_calib_data()
+        if ret is None:  # If too few correspondencies, just quit.
+            return
+        cam1_ipts, cam2_ipts, b = ret
+
+        #TODO add debug flag for useful printouts like this:
+        """
         print "Calibration data info:"
         print "  CAM1 data array shape:\t %s" % str(cam1_ipts.shape)
         print "  CAM2 data array shape:\t %s" % str(cam2_ipts.shape)
         print "  BOARD data array shape:\t %s" % str(b.shape)
+        """
 
-        flags = cv2.CALIB_FIX_INTRINSIC
+        if self.cam1_do_mono_calib or self.cam2_do_mono_calib:
+            print "Doing mono calibration for specified cameras."
+            self.mono_cal_fromcorners(cam1_ipts, cam2_ipts, b)
+
+        print "Doing stereo calibration..."
+        flags = cv2.CALIB_FIX_INTRINSIC # Intrinsics must be provided.
 
         self.T = numpy.zeros((3, 1), dtype=numpy.float64)
         self.R = numpy.eye(3, dtype=numpy.float64)
-        self.cam2_D = np.zeros((5,1), np.float64)
+        #self.cam2_D = np.zeros((5,1), np.float64)
         if LooseVersion(cv2.__version__).version[0] == 2:
             cv2.stereoCalibrate(b, cam1_ipts, cam2_ipts, 
-                               self.size,
+                    self.cam1_size,
                                self.cam1_K, self.cam1_D,
                                self.cam2_K, self.cam2_D,
                                self.R,                            # R
@@ -487,19 +520,41 @@ class AsyncStereoCalibrator(object):
                                self.T,                            # T
                                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1, 1e-5),
                                flags = flags)
-        print "RESULTS (R, T):"
-        print self.R, "\n", self.T
+        print "=======STEREO======"
+        print "R = "
+        print self.R, 
+        print "\nT = "
+        print self.T
         homog = np.hstack((self.R, np.array([[0],[0],[0]])))
         homog = np.vstack((homog, np.array([0,0,0,1])))
-        print "R AS A QUATERNION:"
+        print "\nR as a quaternion:"
         q = tf.transformations.quaternion_from_matrix(homog)
         print q
         # NOTE quat_from_mat() doesn't return a quaternion object!
         #   But the Pose msg requires one!  
-        #   Fun times if ya like debugging cryptic errors!
+        #   Fun times if ya like debugging cryptic errors.
         q_msg = Quaternion(q[0], q[1], q[2], q[3])
         t_msg = Point(self.T[0], self.T[1], self.T[2])
 
+
+        if self.save_calib_results:
+            filename = self.save_data_dir + "stereoParams.yaml"
+            while os.path.isfile(filename):
+                root, ext = os.path.splitext(filename)
+                filename = root + "_new" + ext
+            data = dict(
+                    R = self.R.flatten().tolist(),
+                    T = self.T.flatten().tolist(),
+                    R_quaternion = q.flatten().tolist())
+            with open(filename,'w') as f:
+                yaml.dump(data, f, default_flow_style=False)
+            print "===Saved results to " + filename
+        else:
+            "Results not saved."
+
+        print "~~~ Calibration finished! ~~~"
+    
+        '''
         # Send the calculated tf to the tf handler node:
         posemsg = Pose(t_msg, q_msg)
         try:
@@ -508,9 +563,106 @@ class AsyncStereoCalibrator(object):
             print "Service request was successful!"
         print "Shutting down calibrator node %s" % rospy.get_name()
         sys.exit([0])
+        '''
 
-        #TODO need this?
-        #self.set_alpha(0.0)
+    def mono_cal_fromcorners(self, cam1_ipts, cam2_ipts, opts):
+        #TODO get img size for both cams
+        # Calib for cam1:
+        if self.cam1_do_mono_calib:
+            intrinsics = numpy.zeros((3, 3), numpy.float64)
+            distortion = numpy.zeros((8, 1), numpy.float64) # rational polynomial
+            #TODO rational distortion always returns zero vector...
+            """
+            dist_model = "rational"
+            if cv2.CALIB_RATIONAL_MODEL:
+                distortion = numpy.zeros((8, 1), numpy.float64) # rational polynomial
+            else:
+            """
+            distortion = numpy.zeros((5, 1), numpy.float64) # plumb bob
+            dist_model = "plumb_bob"
+            # If FIX_ASPECT_RATIO flag set, enforce focal lengths have 1/1 ratio
+            intrinsics[0,0] = 1.0
+            intrinsics[1,1] = 1.0
+            cv2.calibrateCamera(
+                       opts, cam1_ipts,
+                       self.cam1_size, intrinsics,
+                       distortion)
+            self.cam1_K, self.cam1_D = intrinsics, distortion
+            print "======CAM1====="
+            print "INTRINSICS:"
+            print intrinsics
+            print "DISTORTION:"
+            print distortion
+            if self.save_calib_results:
+                self.save_mono_calib_results(self.cam1_K, self.cam1_D, 
+                        dist_model, self.cam1_size, "cam1")
+
+        if self.cam2_do_mono_calib:
+            # Calib for cam2:
+            intrinsics = numpy.zeros((3, 3), numpy.float64)
+            distortion = numpy.zeros((8, 1), numpy.float64) # rational polynomial
+            """
+            dist_model = "rational"
+            if cv2.CALIB_RATIONAL_MODEL:
+                distortion = numpy.zeros((8, 1), numpy.float64) # rational polynomial
+            else:
+            """
+            distortion = numpy.zeros((5, 1), numpy.float64) # plumb bob
+            dist_model = "plumb_bob"
+            # If FIX_ASPECT_RATIO flag set, enforce focal lengths have 1/1 ratio
+            intrinsics[0,0] = 1.0
+            intrinsics[1,1] = 1.0
+            cv2.calibrateCamera(
+                       opts, cam2_ipts,
+                       self.cam2_size, intrinsics,
+                       distortion)
+            self.cam2_K, self.cam2_D = intrinsics, distortion
+            print "======CAM2====="
+            print "INTRINSICS:"
+            print intrinsics
+            print "DISTORTION:"
+            print distortion
+            if self.save_calib_results:
+                self.save_mono_calib_results(self.cam2_K, self.cam2_D, 
+                        dist_model, self.cam2_size, "cam2")
+
+    def save_mono_calib_results(self, K, D, dist_model, image_size, cam_name):
+        height, width = image_size
+        P = np.vstack((K, np.array([0,1,0])))
+
+        filename = self.save_data_dir + cam_name + "Params.yaml"
+        while os.path.isfile(filename):
+            root, ext = os.path.splitext(filename)
+            filename = root + "_new" + ext
+        data = dict(
+                image_width = width,
+                image_height = height,
+                camera_name = cam_name,
+                camera_matrix = dict(
+                    rows = 3,
+                    cols = 3,
+                    data = K.flatten().tolist()
+                    ),
+                distortion_model = dist_model,
+                distortion_coefficients = dict(
+                    rows = 1,
+                    cols = 5,
+                    data = D.flatten().tolist()
+                    ),
+                rectification_matrix = dict(
+                    rows = 3,
+                    cols = 3,
+                    data = np.eye(3).flatten().tolist()
+                    ),
+                projection_matrix = dict(
+                    rows = 3,
+                    cols = 4,
+                    data = P.flatten().tolist()
+                    )
+                )
+        with open(filename,'w') as f:
+            yaml.dump(data, f, default_flow_style=False)
+        print "===Saved results to " + filename
 
     # Load calib data from file or prepare it from newly captured frames.
     #   Return cam1_points, cam2_points, board_points
@@ -518,36 +670,10 @@ class AsyncStereoCalibrator(object):
         cam1_ipts, cam2_ipts, b = None, None, None
         
         if self.load_calib_data: ### Load data from save_data_dir:
+            # Load images and run chessboard detection:
             if self.load_calib_imgs:
-                # TODO img dir set by param:
-                img_dir = "/tmp/imgs_2016-04-01-16-21-47"
-                print "Attempting to load images from %s:"
-                cam1_filenames = filter(lambda s: "cam1_" in s, os.listdir(img_dir))
-                cam2_filenames = filter(lambda s: "cam2_" in s, os.listdir(img_dir))
-                cam1_filenames.sort(key=lambda s: int(s[5:s.index('.png')]))
-                cam2_filenames.sort(key=lambda s: int(s[5:s.index('.png')]))
-                img_pairs_filenames = zip(cam1_filenames, cam2_filenames)
-                cam1_ipts_list, cam2_ipts_list = [], []
-
-                for cam1_file, cam2_file in img_pairs_filenames:
-                    cam1_img = cv2.imread(img_dir + "/" + cam1_file, 0)
-                    cam2_img = cv2.imread(img_dir + "/" + cam2_file, 0)
-                    cam2_img = cv2.flip(cam2_img, -1)
-                    scrib, corners, downsampled_corners, scales = self.downsample_and_detect(cam1_img)
-                    if corners is not None:
-                        print "Found corners in cam1 img!  Checking cam2:"
-                        scrib2, corners2, downsampled_corners2, scales2 = self.downsample_and_detect(cam1_img)
-                        if corners2 is None:
-                            print "Could not find corners in cam2 img."
-                            continue
-                        print "Found corners in cam2 img!  ADDING PAIR TO LIST."
-                        cam1_ipts_list.append(corners)
-                        cam2_ipts_list.append(corners2)
-                    else:  # If corners not found in cam1
-                        continue
-                cam1_ipts = np.array(cam1_ipts_list)
-                cam2_ipts = np.array(cam2_ipts_list)
-                b = np.array([self.CHESSBOARD[0] for i in range(len(cam1_ipts))])
+                cam1_ipts, cam2_ipts, b = self.load_imgs_and_get_pts()
+            # Load previously-detected chessboard points:
             else:
                 try:
                     print "Attempting to load data from %s" % self.load_data_dir
@@ -561,7 +687,8 @@ class AsyncStereoCalibrator(object):
                 except IOError:
                     print "FAILED TO FIND SAVED DATA!"
                     sys.exit(["Exited on load failure."])
-        else: ### Create calib point arrays from captured correspondencies:
+        ### Create calib point arrays from captured correspondencies:
+        else: 
             # each elem in stereo_corr.s: (cam1_frame, cam2_frame)
             # each cam#_frame: (img, corners, timestamp)
             cam1_ipts = np.array([ cam1[1] for cam1, cam2 in self.stereo_correspondences])
@@ -575,8 +702,8 @@ class AsyncStereoCalibrator(object):
                         corners[i,0,0] = xtion_x - corners[i,0,0]
             except IndexError:
                 n = str(len(self.stereo_correspondences))
-                print "NOT ENOUGH CORRESPONDENCES FOUND: %s" % n
-                return
+                rospy.logwarn("Insufficient number correspondences to do calibration: %s" % n)
+                return 
 
             #cv2.stereoCalib requires each image pair have its own set of board points...
             b = np.array([self.CHESSBOARD[0] for i in range(len(self.stereo_correspondences))])
@@ -594,16 +721,69 @@ class AsyncStereoCalibrator(object):
                 print "\tCAM1 PTS: %s" % cam1_file
                 numpy.save(cam2_file,cam2_ipts)
                 print "\tCAM2 PTS: %s" % cam2_file
+        
+        # Correct ipts for any upside-down cameras:
+        # Reverse order of point coords to ensure upside down ipts 
+        #   have the correct checkerboard orientation.  
+        #   (TODO less cryptic comment :P )
+        if self.cam1_is_upside_down:
+            print "Correcting ipts for upside-down camera 1."
+            cam1_ipts = cam1_ipts[:,::-1,:,:]
+        if self.cam2_is_upside_down:
+            print "Correcting ipts for upside-down camera 2."
+            cam2_ipts = cam2_ipts[:,::-1,:,:]
 
         return cam1_ipts, cam2_ipts, b
 
+# Load imgs and perform checkerboard detection on them.
+#  Return 3-tuple: left img pts, right img pts, and board pts.
+    def load_imgs_and_get_pts(self):
+        img_dir = self.load_data_dir
+        print "Attempting to load images from %s:" % img_dir
+        # Expects img_dir to contain file names of the form camX_#.(extension)
+        img_filenames = filter(lambda s:".png" in s, os.listdir(img_dir))
+        cam1_filenames = filter(lambda s: "cam1_" in s, img_filenames)
+        cam2_filenames = filter(lambda s: "cam2_" in s, img_filenames)
+        cam1_filenames.sort(key=lambda s: int(s[5:s.index('.png')]))
+        cam2_filenames.sort(key=lambda s: int(s[5:s.index('.png')]))
+        img_pairs_filenames = zip(cam1_filenames, cam2_filenames)
+        self.img_ext = os.path.splitext(cam1_filenames[0])
+        cam1_ipts_list, cam2_ipts_list = [], []
+
+        for cam1_file, cam2_file in img_pairs_filenames:
+            cam1_img = cv2.imread(img_dir + "/" + cam1_file, 0)
+            if self.cam1_size == None:
+                self.cam1_size = cam1_img.shape[0:2]
+            cam2_img = cv2.imread(img_dir + "/" + cam2_file, 0)
+            if self.cam2_size == None:
+                self.cam2_size = cam2_img.shape[0:2]
+            scrib, corners, downsampled_corners, scales = self.downsample_and_detect(cam1_img)
+            if corners is not None:
+                print "Found corners in cam1 img!  Checking cam2:"
+                scrib2, corners2, downsampled_corners2, scales2 = self.downsample_and_detect(cam1_img)
+                if corners2 is None:
+                    print "Could not find corners in cam2 img."
+                    continue
+                print "Found corners in cam2 img!  ADDING PAIR TO LIST."
+                cam1_ipts_list.append(corners)
+                cam2_ipts_list.append(corners2)
+            else:  # If corners not found in cam1
+                continue
+        cam1_ipts = np.array(cam1_ipts_list)
+        cam2_ipts = np.array(cam2_ipts_list)
+        b = np.array([self.CHESSBOARD[0] for i in range(len(cam1_ipts))])
+
+        return cam1_ipts, cam2_ipts, b
+
+
     def mk_object_points(self, use_board_size = False):
+        '''This function based on code from the ROS camera calibration package.'''
         opts = []
-        num_pts = self.n_board_cols * self.n_board_rows
+        num_pts = self.N_BOARD_COLS * self.N_BOARD_ROWS
         opts_loc = numpy.zeros((num_pts, 1, 3), numpy.float32)
         for j in range(num_pts):
-            opts_loc[j, 0, 0] = (j / self.n_board_cols)
-            opts_loc[j, 0, 1] = (j % self.n_board_cols)
+            opts_loc[j, 0, 0] = (j / self.N_BOARD_COLS)
+            opts_loc[j, 0, 1] = (j % self.N_BOARD_COLS)
             opts_loc[j, 0, 2] = 0
             if use_board_size:
                 opts_loc[j, 0, :] = opts_loc[j, 0, :] * self.CHESSBOARD_SIZE
@@ -617,9 +797,13 @@ def start_calibrator():
     cam1 = rospy.get_param('cam1') # a dict
     cam1['K'] = np.array(cam1['K'])
     cam1['D'] = np.array(cam1['D'])
+    cam1_do_mono_calib = cam1['do_mono_calib']
+    cam1_is_upside_down = cam1['is_upside_down']
     cam2 = rospy.get_param('cam2')
     cam2['K'] = np.array(cam2['K'])
     cam2['D'] = np.array(cam2['D'])
+    cam2_is_upside_down = cam2['is_upside_down']
+    cam2_do_mono_calib = cam2['do_mono_calib']
 
     # Fetch calibration parameters:
     board_rows = rospy.get_param('~board_rows')
@@ -629,41 +813,28 @@ def start_calibrator():
     save_calib_data = rospy.get_param('~save_calib_data')
     load_data_dir = rospy.get_param('~load_data_dir')
     save_data_dir = rospy.get_param('~save_data_dir')
+    save_results = rospy.get_param('~save_calib_results')
+    manual_frame_cap = rospy.get_param('~manual_frame_capture')
     save_imgs = rospy.get_param('~save_calib_imgs')
+    load_imgs = rospy.get_param('~load_calib_imgs')
 
 
     calibrator = AsyncStereoCalibrator("cam1_feed","cam2_feed", 
             cam1['K'], cam1['D'],cam2['K'], cam2['D'],
             board_dim = (board_rows, board_cols), board_size = board_size,
+            cam1_is_upside_down = cam1_is_upside_down,
+            cam2_is_upside_down = cam2_is_upside_down,
+            cam1_do_mono_calib = cam1_do_mono_calib,
+            cam2_do_mono_calib = cam2_do_mono_calib,
             load_calib_data = load_calib_data,
+            load_calib_imgs = load_imgs,
             save_calib_data = save_calib_data,
             save_calib_imgs = save_imgs,
+            save_calib_results = save_results,
+            manual_frame_capture = manual_frame_cap,
             load_data_dir = load_data_dir,
             save_data_dir = save_data_dir)
     rospy.spin()
 
 if __name__ == "__main__":
     start_calibrator()
-
-    '''
-    rospy.init_node('stereo_calibrator')
-    xtion_K = np.array([[525.0, 0.0, 319.5], 
-                        [0.0, 525.0, 239.5], 
-                        [0.0, 0.0, 1.0]])
-    xtion_K = np.array([[ 552.24642152,0.0,325.71609566],
-        [0.0,549.55314454,236.11290228],
-        [0.0,0.0,1.0]])
-    xtion_D = np.zeros((5,1), np.float64)
-    d = [ 0.01178956, -0.01958604, -0.00250728, -0.0011414,  0.00411025]
-    for i in range(len(xtion_D)):
-        xtion_D[i][0] = d[i]
-
-    # The bumblebee is already undistorted:
-    bumblebee_K = np.array([[811.857711829874, 0.0, 515.7504920959473],
-            [0.0, 811.857711829874, 403.7249565124512], 
-            [0.0, 1.0, 0.0]])
-    bumblebee_D = np.zeros((5,1), np.float64)
-
-    calibrator = AsyncStereoCalibrator("/bumblebee/left/image_rect","/xtion/rgb/image_rect_mono", bumblebee_K, bumblebee_D,xtion_K, xtion_D, load_calib_data = False)
-    rospy.spin()
-    '''
